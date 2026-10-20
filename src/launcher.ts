@@ -42,6 +42,40 @@ export class CodesysLauncher implements ScriptExecutor {
   }
 
   /**
+   * Verify a PID is actually a CODESYS process.
+   *
+   * `process.kill(pid, 0)` only proves *some* process holds the PID. Windows
+   * recycles PIDs aggressively, so a dead CODESYS whose PID has been reused
+   * would otherwise be adopted as a live session - and, worse, force-killed on
+   * shutdown, terminating whatever unrelated program now owns that PID.
+   * Observed: a recycled CODESYS PID that by then belonged to the MCP host's
+   * own Node process. Fails closed (returns false) so a failed probe never
+   * authorises a kill.
+   */
+  private isCodesysProcess(pid: number): boolean {
+    try {
+      process.kill(pid, 0);
+    } catch {
+      return false; // no process holds this PID
+    }
+    if (process.platform !== 'win32') return true;
+    try {
+      const { execSync } = require('child_process');
+      const out: string = execSync(`tasklist /FI "PID eq ${pid}" /FO CSV /NH`, {
+        timeout: 5_000,
+        encoding: 'utf-8',
+      });
+      const line = String(out).trim().toLowerCase();
+      // tasklist prints `INFO: No tasks are running...` (unquoted) when absent
+      if (!line.startsWith('"')) return false;
+      const expected = path.basename(this.config.codesysPath).toLowerCase();
+      return line.includes(expected);
+    } catch {
+      return false;
+    }
+  }
+
+  /**
    * Scan %TEMP%/codesys-mcp-persistent/ for an existing live session and
    * adopt it. Used at first launch() after an MCP-server restart, where the
    * previous server left a perfectly good CODESYS+watcher running but the
@@ -50,7 +84,7 @@ export class CodesysLauncher implements ScriptExecutor {
    *
    * Adoption rules:
    *   - The session's ready.signal must exist and parse as JSON.
-   *   - The PID recorded in ready.signal must still be alive.
+   *   - The PID recorded in ready.signal must still be a live CODESYS process.
    *   - The recorded profile must match config.profileName (skip if mismatched).
    *   - When multiple candidates exist, prefer the most-recently-modified
    *     ready.signal (newest live session).
@@ -79,8 +113,12 @@ export class CodesysLauncher implements ScriptExecutor {
             !parsed.python_version.includes(this.config.profileName)) {
           continue;
         }
-        // Liveness check.
-        try { process.kill(parsed.pid, 0); } catch { continue; }
+        // Liveness check: the PID must still be a CODESYS process, not merely
+        // some process that inherited a recycled PID.
+        if (!this.isCodesysProcess(parsed.pid)) {
+          launcherLog.info(`Skipping stale session ${ent.name}: PID ${parsed.pid} is not a live CODESYS process`);
+          continue;
+        }
         const mtime = fs.statSync(sigPath).mtimeMs;
         candidates.push({ dir, pid: parsed.pid, sig: sigPath, mtime });
       }
@@ -353,8 +391,16 @@ sys.exit(0)
         await this.sleep(500);
       }
 
-      // Force kill if still alive
-      if (this.isRunning() && this.pid !== null) {
+      // Force kill if still alive. Never kill a PID we cannot confirm is
+      // CODESYS - an adopted session may hold a recycled PID now owned by an
+      // unrelated program.
+      if (this.isRunning() && this.pid !== null && !this.isCodesysProcess(this.pid)) {
+        launcherLog.warn(
+          `Refusing to kill PID ${this.pid}: it is not a CODESYS process (stale/recycled PID). Clearing state without killing.`
+        );
+        this.pid = null;
+        this.process = null;
+      } else if (this.isRunning() && this.pid !== null) {
         launcherLog.warn('Force-killing CODESYS process');
         try {
           // On Windows, use taskkill for reliable process termination
