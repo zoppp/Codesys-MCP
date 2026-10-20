@@ -94,7 +94,7 @@ try:
             "Project creation returned None for target %s (mode=%s)." % (PROJECT_FILE_PATH, TEMPLATE_MODE)
         )
 
-    # Brief settle, then explicit save — same pattern as before. Save failures
+    # Brief settle, then explicit save - same pattern as before. Save failures
     # don't fail the call; the project is still in memory and usable.
     print("DEBUG: Pausing briefly before save...")
     time.sleep(1.0)

@@ -11,7 +11,7 @@ def _login(online_app, mode):
     """Perform the login that pushes new code to the PLC.
 
     In CODESYS V3 there's no separate `download()` method on
-    `IScriptOnlineApplication` — the download happens as part of login,
+    `IScriptOnlineApplication` - the download happens as part of login,
     driven by the `OnlineChangeOption` argument. So this is really the
     "push code" function:
       - `.Force` = full download
@@ -98,7 +98,7 @@ try:
 
     # After login the new code is on the PLC. Build the boot
     # application so the change survives a power cycle. Not all
-    # IScriptOnlineApplication implementations expose this — skip
+    # IScriptOnlineApplication implementations expose this - skip
     # silently if unavailable.
     if hasattr(online_app, 'create_boot_application'):
         try:
@@ -106,7 +106,7 @@ try:
             print("DEBUG: Boot application created.")
         except Exception as boot_err:
             # Boot creation failure is non-fatal for the download
-            # itself — the runtime has the new code, it just won't
+            # itself - the runtime has the new code, it just won't
             # survive power-cycle. Log and move on.
             print("WARN: create_boot_application failed: %s" % boot_err)
 

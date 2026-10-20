@@ -21,7 +21,7 @@ try:
     # value (the runtime accepts the write and holds the variable at
     # that value until unforced). For BOOL/INT control flags this is
     # what you want. For variables the PLC program also writes to (e.g.
-    # counters, outputs from FBs) forcing will freeze them — caller
+    # counters, outputs from FBs) forcing will freeze them - caller
     # should follow up with set_unforce_value or restart the runtime.
     #
     # All calls are routed through with_executor so the scripting

@@ -35,7 +35,7 @@ try:
     # with_executor so the CODESYS scripting executor fires its
     # Executing event and the internal _executionStack is populated.
     # This is the same Stack-empty workaround that
-    # ensure_online_connection uses for create_online_application — it
+    # ensure_online_connection uses for create_online_application - it
     # applies to every online op when driven from a pure IPC script.
     if hasattr(online_app, 'read_value'):
         read_fn = online_app.read_value

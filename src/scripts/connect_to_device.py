@@ -35,7 +35,7 @@ try:
         if node_addr:
             print("DEBUG: device address resolved to node form '%s'" % node_addr)
         else:
-            # Scan didn't help — log and continue. Login may still
+            # Scan didn't help - log and continue. Login may still
             # succeed if a stale cached resolution survives, or if this
             # CODESYS version routes by IP directly.
             print("DEBUG: address resolution returned no node; "

@@ -4,10 +4,10 @@ import sys, scriptengine as script_engine, os, traceback
 EXTRA_TEMPLATE_DIR = "{EXTRA_TEMPLATE_DIR}"
 
 # Lists project templates known to this CODESYS install via two channels:
-#   1) ScriptEngine API (if exposed in this SP) — picks up templates registered
+#   1) ScriptEngine API (if exposed in this SP) - picks up templates registered
 #      by package installers (e.g. the ifm "CODESYS for all ifm edgeController"
 #      package), which don't necessarily exist as free-standing .project files.
-#   2) Filesystem scan of well-known template directories — picks up any
+#   2) Filesystem scan of well-known template directories - picks up any
 #      `.project` / `.projecttemplate` left behind by users or installers that
 #      bypass the registered Template Manager.
 #
@@ -100,7 +100,7 @@ try:
     candidate_dirs.append(os.path.join(program_data, 'CODESYS', 'Templates'))
     candidate_dirs.append(os.path.join(program_data, 'CODESYS', 'CODESYS', 'Templates'))
     # Devices/ holds device packages; some ifm packages drop .project templates
-    # inside their device subtree. We don't walk all 100k+ entries — limit to
+    # inside their device subtree. We don't walk all 100k+ entries - limit to
     # one level deep on each device to keep this fast.
     devices_root = os.path.join(program_data, 'CODESYS', 'Devices')
     if EXTRA_TEMPLATE_DIR:

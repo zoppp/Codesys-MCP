@@ -107,7 +107,7 @@ try:
 
     def _probe(obj, attrs):
         """Read first non-empty attribute. Tries plain, then callable() and
-        callable('en') — CODESYS localised name getters often take a locale.
+        callable('en') - CODESYS localised name getters often take a locale.
         """
         for a in attrs:
             if obj is None or not hasattr(obj, a):

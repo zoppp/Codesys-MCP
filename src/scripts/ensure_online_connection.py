@@ -13,7 +13,7 @@
 #       the IDE-internal _executionStack is populated. Every online
 #       op (login, start, stop, read_value, set_prepared_value,
 #       force_prepared_values, create_boot_application, ...) should
-#       be invoked via with_executor — without it, calls can hit
+#       be invoked via with_executor - without it, calls can hit
 #       "Stack empty" the same way create_online_application does.
 #
 #   - resolve_device_address(primary_project)
@@ -296,7 +296,7 @@ def ensure_online_connection(primary_project):
             "create_online_application raised 'Stack empty' and the "
             "ExecuteSource fallback is unavailable (scriptengine."
             "online._executor field could not be resolved via "
-            "reflection — likely renamed in this CODESYS version). "
+            "reflection - likely renamed in this CODESYS version). "
             "Manual workaround: click Online -> Login once in the "
             "IDE for this session."
         )
