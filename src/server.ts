@@ -132,8 +132,13 @@ export async function startMcpServer(config: ServerConfig): Promise<void> {
 
   s.tool(
     'launch_codesys',
-    'Manually launch CODESYS with UI. Use when --no-auto-launch was set.',
-    async () => {
+    'Manually launch CODESYS with UI. Use when --no-auto-launch was set. Optional additionalFolder pins this launch to a project-specific library set.',
+    {
+      additionalFolder: z.string().optional().describe(
+        "CODESYS AdditionalFolder for THIS launch (e.g. 'C:\\\\Program Files\\\\CODESYS 3.5.19.70\\\\CODESYS\\\\AdditionalFolders\\\\MyLibrarySet'). Overrides --additional-folder; omit to use the server default. Required by projects pinned to a non-Default library set - launching without the right folder resolves a different library generation and the project fails to compile."
+      ),
+    },
+    async (args: { additionalFolder?: string }) => {
       if (!launcher) {
         return {
           content: [{ type: 'text' as const, text: 'Persistent mode not configured. Use --mode persistent.' }],
@@ -141,11 +146,18 @@ export async function startMcpServer(config: ServerConfig): Promise<void> {
         };
       }
       try {
-        await launcher.launch();
+        await launcher.launch({ additionalFolder: args.additionalFolder });
         executor.swapNow(launcher);
         executionMode = 'persistent';
+        const folder = args.additionalFolder ?? config.additionalFolder;
+        const folderNote = folder
+          ? ` AdditionalFolder: ${folder}.`
+          : ' No AdditionalFolder (Default library set).';
         return {
-          content: [{ type: 'text' as const, text: 'CODESYS launched successfully in persistent mode.' }],
+          content: [{
+            type: 'text' as const,
+            text: `CODESYS launched successfully in persistent mode.${folderNote} Note: if an existing live session was adopted, it keeps the folder it was originally launched with.`,
+          }],
           isError: false,
         };
       } catch (err) {

@@ -31,6 +31,11 @@ program
     process.env.CODESYS_PROFILE || 'CODESYS V3.5 SP21'
   )
   .option(
+    '-a, --additional-folder <dir>',
+    'CODESYS AdditionalFolder (--additionalfolder); required by projects pinned to a non-Default library set',
+    process.env.CODESYS_ADDITIONAL_FOLDER || ''
+  )
+  .option(
     '-w, --workspace <dir>',
     'Workspace directory for relative project paths',
     process.cwd()
@@ -89,6 +94,7 @@ if (opts.detect) {
   const config: ServerConfig = {
     codesysPath: opts.codesysPath.trim(),
     profileName: opts.codesysProfile.trim(),
+    additionalFolder: (opts.additionalFolder || '').trim() || undefined,
     workspaceDir: opts.workspace.trim(),
     autoLaunch: opts.autoLaunch !== false,
     keepAlive: opts.keepAlive || false,
@@ -103,6 +109,9 @@ if (opts.detect) {
   process.stderr.write(`Starting CODESYS MCP Server v${version}\n`);
   process.stderr.write(`  CODESYS Path: ${config.codesysPath}\n`);
   process.stderr.write(`  Profile: ${config.profileName}\n`);
+  if (config.additionalFolder) {
+    process.stderr.write(`  AdditionalFolder: ${config.additionalFolder}\n`);
+  }
   process.stderr.write(`  Mode: ${config.mode}\n`);
   process.stderr.write(`  Auto-launch: ${config.autoLaunch}\n`);
 

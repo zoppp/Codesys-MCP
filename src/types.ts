@@ -36,6 +36,13 @@ export interface LauncherConfig {
    * CODESYS instance the user might be using.
    */
   killExistingCodesys?: boolean;
+  /**
+   * Optional CODESYS AdditionalFolder passed as `--additionalfolder=<dir>`.
+   * Some projects pin their library set (notably the visualization profile)
+   * to a non-Default AdditionalFolder; without it the IDE resolves a
+   * different library generation and the project fails to compile.
+   */
+  additionalFolder?: string;
 }
 
 /** Runtime status of the CODESYS launcher */

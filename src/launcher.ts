@@ -105,12 +105,21 @@ export class CodesysLauncher implements ScriptExecutor {
     }
   }
 
-  /** Launch CODESYS with UI and watcher script */
-  async launch(): Promise<void> {
+  /**
+   * Launch CODESYS with UI and watcher script.
+   *
+   * `overrides.additionalFolder` lets a caller pick the AdditionalFolder per
+   * launch instead of per server process, so one MCP config can serve several
+   * projects with different pinned library sets. The configured value stays
+   * the fallback when no override is supplied.
+   */
+  async launch(overrides?: { additionalFolder?: string }): Promise<void> {
     if (this.state === 'ready' || this.state === 'launching') {
       launcherLog.warn(`Cannot launch: state is ${this.state}`);
       return;
     }
+
+    const additionalFolder = overrides?.additionalFolder ?? this.config.additionalFolder;
 
     // First: try to adopt an existing live session left by a previous MCP
     // server process. This closes out the "orphan CODESYS on MCP restart"
@@ -229,8 +238,14 @@ export class CodesysLauncher implements ScriptExecutor {
       // CODESYS as `--profile=CODESYS V3.5 SP19 Patch 7` and the IDE falls back to the
       // 'Select Profile' dialog, which blocks --runscript until someone clicks Continue.
       `--profile="${this.config.profileName}"`,
-      `--runscript="${watcherPath}"`,
     ];
+    if (additionalFolder) {
+      // Quoted for the same reason as --profile, and as the CODESYS Installer passes it:
+      // AdditionalFolders usually live under "C:\Program Files\...", and an unquoted value
+      // with spaces reached CODESYS mangled - the launch crashed in the plug-in cache rebuild.
+      codesysArgs.push(`--additionalfolder="${additionalFolder}"`);
+    }
+    codesysArgs.push(`--runscript="${watcherPath}"`);
     const codesysDir = path.dirname(this.config.codesysPath);
 
     launcherLog.info(`Spawning: ${this.config.codesysPath} ${codesysArgs.join(' ')}`);

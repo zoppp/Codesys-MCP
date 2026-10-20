@@ -47,6 +47,7 @@ For SP21+, set `--mode headless` (each tool call spawns a `--noUI` CODESYS proce
 |---|---|---|
 | `-p, --codesys-path <path>` | Path to `CODESYS.exe` | `$CODESYS_PATH` or `C:\Program Files\CODESYS 3.5.21.0\CODESYS\Common\CODESYS.exe` |
 | `-f, --codesys-profile <name>` | CODESYS profile name | `$CODESYS_PROFILE` or `CODESYS V3.5 SP21` |
+| `-a, --additional-folder <dir>` | CODESYS AdditionalFolder (`--additionalfolder`), for projects pinned to a non-Default library set | `$CODESYS_ADDITIONAL_FOLDER` or none |
 | `-w, --workspace <dir>` | Workspace for relative paths | cwd |
 | `-m, --mode <mode>` | `persistent` or `headless` | `persistent` |
 | `--no-auto-launch` | Don't launch CODESYS on startup | auto-launch on |
@@ -58,7 +59,7 @@ For SP21+, set `--mode headless` (each tool call spawns a `--noUI` CODESYS proce
 | `--verbose` / `--debug` | Logging | - |
 
 Environment variables:
-- `CODESYS_PATH`, `CODESYS_PROFILE` — defaults for the corresponding flags
+- `CODESYS_PATH`, `CODESYS_PROFILE`, `CODESYS_ADDITIONAL_FOLDER` — defaults for the corresponding flags
 - `CODESYS_MCP_READY_TIMEOUT_MS` — watcher-ready deadline (default `180000`)
 
 ## Tools
@@ -67,7 +68,7 @@ Environment variables:
 
 | Tool | Description |
 |---|---|
-| `launch_codesys` | Manually launch CODESYS (use with `--no-auto-launch`). Adopts a live session if one exists |
+| `launch_codesys` | Manually launch CODESYS (use with `--no-auto-launch`). Adopts a live session if one exists. Optional `additionalFolder` picks the library set for this launch |
 | `shutdown_codesys` | Shut down the persistent CODESYS instance |
 | `get_codesys_status` | Report state, PID, execution mode |
 | `eval_python` | **[DEV]** Execute arbitrary IronPython 2.7 against the live `scriptengine`. Code must `print("SCRIPT_SUCCESS")` before exit |
