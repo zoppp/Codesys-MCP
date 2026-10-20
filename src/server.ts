@@ -281,7 +281,7 @@ export async function startMcpServer(config: ServerConfig): Promise<void> {
       };
       const text = [
         `State: ${status.state}`,
-        `Mode: ${executionMode}`,
+        `Mode: ${launcher && status.state !== 'ready' ? 'persistent (not launched)' : executionMode}`,
         `PID: ${status.pid ?? 'N/A'}`,
         `Session: ${status.sessionId ?? 'N/A'}`,
         `Owner tag: ${launcher?.ownerTag() ?? 'none (implicit re-attach falls back to the parent process)'}`,
@@ -1981,6 +1981,17 @@ export async function startMcpServer(config: ServerConfig): Promise<void> {
     }
     process.exit(0);
   };
+
+  // The client closed our stdin (session ended or MCP reconnect). Nothing can reach this
+  // server any more; leave CODESYS running for this session's next server to re-attach,
+  // and exit instead of holding a live lease on it.
+  const onClientGone = () => {
+    serverLog.info('stdin closed; releasing the lease and exiting (CODESYS left running)');
+    launcher?.releaseLease();
+    process.exit(0);
+  };
+  process.stdin.on('end', onClientGone);
+  process.stdin.on('close', onClientGone);
 
   process.on('SIGINT', shutdown);
   process.on('SIGTERM', shutdown);

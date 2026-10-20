@@ -356,6 +356,19 @@ export class CodesysLauncher implements ScriptExecutor {
     this.leaseInterval = setInterval(() => this.writeLease(), HEALTH_CHECK_INTERVAL_MS);
   }
 
+  /**
+   * The client is gone: stop the heartbeat and mark the lease expired, so this
+   * session's next server re-attaches at once. CODESYS keeps running.
+   */
+  releaseLease(): void {
+    this.stopLease();
+    if (!this.ipcDir) return;
+    try {
+      const lease: SessionOwner = { ...this.identity(), heartbeat: 0 };
+      fs.writeFileSync(path.join(this.ipcDir, LEASE_FILE), JSON.stringify(lease), 'utf-8');
+    } catch { /* best effort */ }
+  }
+
   private stopLease(): void {
     if (this.leaseInterval) {
       clearInterval(this.leaseInterval);
