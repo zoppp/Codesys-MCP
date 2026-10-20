@@ -9,7 +9,7 @@ import { McpServer, ResourceTemplate } from '@modelcontextprotocol/sdk/server/mc
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
 import { ServerConfig, IpcResult, ScriptExecutor, ExecutionMode } from './types';
-import { CodesysLauncher } from './launcher';
+import { CodesysLauncher, SessionInfo } from './launcher';
 import { HeadlessExecutor } from './headless';
 import { ScriptManager } from './script-manager';
 import { ExecutorProxy } from './executor-proxy';
@@ -55,6 +55,35 @@ function formatToolResponse(
   };
 }
 
+/**
+ * Persistent mode before launch_codesys (and after shutdown_codesys). It used to fall
+ * back to headless, which spawned a `CODESYS --noUI` per call against a project another
+ * instance holds locked, on the same PC as other sessions' IDEs.
+ */
+class NotLaunchedExecutor implements ScriptExecutor {
+  async executeScript(): Promise<IpcResult> {
+    throw new Error(
+      'CODESYS is not running for this session. Call launch_codesys first ' +
+      '(get_codesys_status lists the instances on this PC).'
+    );
+  }
+}
+
+function describeOwner(s: SessionInfo | null): string {
+  if (!s) return 'no MCP watcher';
+  switch (s.ownership) {
+    case 'self': return 'this server';
+    case 'same-session': return 'this client session (earlier server)';
+    case 'other-live': return `another live session (server PID ${s.owner?.serverPid})`;
+    case 'orphan': return `orphan of another session (${s.owner?.tag ?? 'unknown'})`;
+    default: return 'unowned (hand-launched watcher or older server)';
+  }
+}
+
+function describeSession(s: SessionInfo): string {
+  return `PID ${s.pid} session ${s.id}: ${describeOwner(s)}`;
+}
+
 /** Check if a file exists (async) */
 async function fileExists(filePath: string): Promise<boolean> {
   try {
@@ -97,13 +126,15 @@ export async function startMcpServer(config: ServerConfig): Promise<void> {
   // the inner executor changes (see executor-proxy.ts for the contract).
   let launcher: CodesysLauncher | null = null;
   let executionMode: ExecutionMode = config.mode;
-  const initialExecutor: ScriptExecutor = new HeadlessExecutor(config);
+  const initialExecutor: ScriptExecutor = config.mode === 'persistent'
+    ? new NotLaunchedExecutor()
+    : new HeadlessExecutor(config);
   const executor = new ExecutorProxy(initialExecutor);
 
   if (config.mode === 'persistent') {
     launcher = new CodesysLauncher(config);
-    // Start in headless mode; we'll swap to the persistent launcher once it's
-    // ready (see "Background auto-launch" block below).
+    // Not launched until launch_codesys or the background auto-launch below swaps the
+    // persistent launcher in.
     executionMode = 'headless';
   }
 
@@ -132,13 +163,18 @@ export async function startMcpServer(config: ServerConfig): Promise<void> {
 
   s.tool(
     'launch_codesys',
-    'Manually launch CODESYS with UI. Use when --no-auto-launch was set. Optional additionalFolder pins this launch to a project-specific library set.',
+    "Launch CODESYS with UI, or re-attach to this session's own instance. Never takes another session's instance unless adopt names it.",
     {
+      adopt: z.string().optional().describe(
+        "Attach to this instance instead of launching: a session id or CODESYS PID from get_codesys_status (e.g. a hand-launched IDE with its own watcher)."
+      ),
+      fresh: z.boolean().optional().describe("Always spawn a new CODESYS, even if this session owns a live one."),
+      force: z.boolean().optional().describe("With adopt: take an instance another live session drives. Only when that session is idle."),
       additionalFolder: z.string().optional().describe(
         "CODESYS AdditionalFolder for THIS launch (e.g. 'C:\\\\Program Files\\\\CODESYS 3.5.19.70\\\\CODESYS\\\\AdditionalFolders\\\\MyLibrarySet'). Overrides --additional-folder; omit to use the server default. Required by projects pinned to a non-Default library set - launching without the right folder resolves a different library generation and the project fails to compile."
       ),
     },
-    async (args: { additionalFolder?: string }) => {
+    async (args: { additionalFolder?: string; adopt?: string; fresh?: boolean; force?: boolean }) => {
       if (!launcher) {
         return {
           content: [{ type: 'text' as const, text: 'Persistent mode not configured. Use --mode persistent.' }],
@@ -146,18 +182,27 @@ export async function startMcpServer(config: ServerConfig): Promise<void> {
         };
       }
       try {
-        await launcher.launch({ additionalFolder: args.additionalFolder });
+        const outcome = await launcher.launch({
+          additionalFolder: args.additionalFolder,
+          adopt: args.adopt,
+          fresh: args.fresh,
+          force: args.force,
+        });
         executor.swapNow(launcher);
         executionMode = 'persistent';
         const folder = args.additionalFolder ?? config.additionalFolder;
-        const folderNote = folder
-          ? ` AdditionalFolder: ${folder}.`
-          : ' No AdditionalFolder (Default library set).';
+        const head = outcome.action === 'spawned'
+          ? `Launched a new CODESYS (PID ${outcome.pid}, session ${outcome.sessionId}). ` +
+            (folder ? `AdditionalFolder: ${folder}.` : 'No AdditionalFolder (Default library set).')
+          : outcome.action === 'already-running'
+            ? `Already attached to PID ${outcome.pid} (session ${outcome.sessionId}).`
+            : `Attached to running CODESYS PID ${outcome.pid} (session ${outcome.sessionId}); ` +
+              'it keeps the AdditionalFolder it was launched with.';
+        const others = outcome.others.length
+          ? '\nLeft alone on this PC:\n' + outcome.others.map((o) => '  ' + describeSession(o)).join('\n')
+          : '';
         return {
-          content: [{
-            type: 'text' as const,
-            text: `CODESYS launched successfully in persistent mode.${folderNote} Note: if an existing live session was adopted, it keeps the folder it was originally launched with.`,
-          }],
+          content: [{ type: 'text' as const, text: head + others }],
           isError: false,
         };
       } catch (err) {
@@ -182,7 +227,7 @@ export async function startMcpServer(config: ServerConfig): Promise<void> {
       }
       // Swap the executor BEFORE awaiting shutdown - if shutdown throws
       // mid-flight, we don't want the proxy still pointing at a dead launcher.
-      executor.swapNow(new HeadlessExecutor(config));
+      executor.swapNow(new NotLaunchedExecutor());
       executionMode = 'headless';
       try {
         await launcher.shutdown();
@@ -239,11 +284,19 @@ export async function startMcpServer(config: ServerConfig): Promise<void> {
         `Mode: ${executionMode}`,
         `PID: ${status.pid ?? 'N/A'}`,
         `Session: ${status.sessionId ?? 'N/A'}`,
+        `Owner tag: ${launcher?.ownerTag() ?? 'none (implicit re-attach falls back to the parent process)'}`,
         `Started: ${status.startedAt ? new Date(status.startedAt).toISOString() : 'N/A'}`,
         status.lastError ? `Last Error: ${status.lastError}` : null,
       ].filter(Boolean).join('\n');
+      const instances = launcher ? launcher.listInstances() : [];
+      const listing = instances.length
+        ? '\n\nCODESYS on this PC:\n' + instances.map((i) =>
+            `  PID ${i.pid}${i.pid === status.pid ? ' (ours)' : ''}: ${describeOwner(i.session)}` +
+            (i.session ? ` [session ${i.session.id}]` : '') +
+            (i.title ? ` - ${i.title}` : '')).join('\n')
+        : '\n\nNo CODESYS running on this PC.';
       return {
-        content: [{ type: 'text' as const, text }],
+        content: [{ type: 'text' as const, text: text + listing }],
         isError: false,
       };
     }
@@ -1902,9 +1955,10 @@ export async function startMcpServer(config: ServerConfig): Promise<void> {
         serverLog.error(`Persistent launch failed: ${errMsg}`);
         if (config.fallbackHeadless) {
           serverLog.warn('Continuing in headless mode (fallback).');
+          executor.swapNow(new HeadlessExecutor(config));
         } else {
           serverLog.error(
-            'No fallback configured; tool calls will keep using headless executor.'
+            'No fallback configured; tool calls fail until launch_codesys succeeds.'
           );
         }
         // Re-throw so the proxy keeps the headless executor.

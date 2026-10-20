@@ -68,9 +68,9 @@ Environment variables:
 
 | Tool | Description |
 |---|---|
-| `launch_codesys` | Manually launch CODESYS (use with `--no-auto-launch`). Adopts a live session if one exists. Optional `additionalFolder` picks the library set for this launch |
+| `launch_codesys` | Launch CODESYS, or re-attach to this session's own live instance. `adopt` (session id or PID) attaches to a named instance, `fresh` always spawns, `force` takes one another live session drives. Optional `additionalFolder` picks the library set for this launch |
 | `shutdown_codesys` | Shut down the persistent CODESYS instance |
-| `get_codesys_status` | Report state, PID, execution mode |
+| `get_codesys_status` | Report state, PID, execution mode, and every CODESYS on the PC with its owner and window title |
 | `eval_python` | **[DEV]** Execute arbitrary IronPython 2.7 against the live `scriptengine`. Code must `print("SCRIPT_SUCCESS")` before exit |
 
 ### Project
@@ -162,9 +162,9 @@ codesys://project/C:/Users/me/Documents/MyPLC.project/pou/Application/MyFB/Metho
 
 ## Execution modes
 
-**Persistent (default).** On launch, the server scans `%TEMP%/codesys-mcp-persistent/` for a live session left by a previous MCP server (matching profile, PID alive, `ready.signal` present) and adopts it. Otherwise it spawns `CODESYS.exe --runscript=watcher.py` (no `--noUI`). The watcher writes `ready.signal`, then runs a background thread that polls a `commands/` directory and marshals each script onto the CODESYS UI thread via `system.execute_on_primary_thread()`. Results land in `results/`; Node polls with exponential backoff (100ms → 1s). The UI stays interactive between commands and pauses briefly during synchronous API calls (compile, open).
+**Persistent (default).** Each server writes an `owner.json` lease (host session id, server PID, heartbeat every 5 s) into the session dir it drives. On launch it scans `%TEMP%/codesys-mcp-persistent/`, deletes dirs with no live CODESYS and no live owner after an hour, and re-attaches only to a live instance this client session owned (an MCP reconnect or app restart; session id from `CODESYS_MCP_OWNER`, `CLAUDE_CODE_HOST_SESSION_ID` or `CLAUDE_CODE_SESSION_ID`). Another session's instance, an orphan of another session, a hand-launched watcher without a lease, or this session's instance while another live server of this session drives it is never taken implicitly: name it with `launch_codesys adopt=...`. If you set `CODESYS_MCP_OWNER`, make it unique per session (never in a shared `.mcp.json`), or every session counts as the same owner. A dir is pruned only after a successful process listing; a CODESYS PID that started after its `ready.signal` counts as recycled. Otherwise it spawns `CODESYS.exe --runscript=watcher.py` (no `--noUI`). The watcher writes `ready.signal`, then runs a background thread that polls a `commands/` directory and marshals each script onto the CODESYS UI thread via `system.execute_on_primary_thread()`. Results land in `results/`; Node polls with exponential backoff (100ms → 1s). The UI stays interactive between commands and pauses briefly during synchronous API calls (compile, open).
 
-**Headless.** Each tool call spawns a new `--noUI` CODESYS process, runs the script, and exits. No UI. Used when `--mode headless` is set, when `--no-auto-launch` is used and `launch_codesys` hasn't been called, or when persistent launch fails and `--fallback-headless` is on.
+**Headless.** Each tool call spawns a new `--noUI` CODESYS process, runs the script, and exits. No UI. Used when `--mode headless` is set, or when the background auto-launch fails and `--fallback-headless` is on. In persistent mode, tools called before `launch_codesys` (or after `shutdown_codesys`) return an error instead of spawning a `--noUI` CODESYS.
 
 ## Detect installations
 

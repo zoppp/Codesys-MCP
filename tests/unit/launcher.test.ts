@@ -9,6 +9,21 @@ import { CodesysLauncher } from '../../src/launcher';
 // They validate the launcher's IPC integration behavior
 
 describe('CodesysLauncher', () => {
+  // launch() scans and prunes %TEMP%\codesys-mcp-persistent; keep it off the real one.
+  const saved = { TEMP: process.env.TEMP, TMP: process.env.TMP, TMPDIR: process.env.TMPDIR };
+  let fakeTemp: string;
+  beforeEach(() => {
+    fakeTemp = fs.mkdtempSync(path.join(os.tmpdir(), 'cmcp-launcher-'));
+    process.env.TEMP = process.env.TMP = process.env.TMPDIR = fakeTemp;
+  });
+  afterEach(() => {
+    for (const [k, v] of Object.entries(saved)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+    fs.rmSync(fakeTemp, { recursive: true, force: true });
+  });
+
   it('rejects launch when CODESYS exe not found', async () => {
     const launcher = new CodesysLauncher({
       codesysPath: 'C:\\nonexistent\\CODESYS.exe',

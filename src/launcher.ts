@@ -24,6 +24,193 @@ const READY_POLL_MS = 500;
 const SHUTDOWN_WAIT_MS = 5_000;
 const HEALTH_CHECK_INTERVAL_MS = 5_000;
 
+// Ownership lease. Every server writes owner.json into the session dir it drives and
+// refreshes it every few seconds, so other servers on the PC (other client sessions) can
+// tell a live owner from an orphan left by a restart.
+const LEASE_FILE = 'owner.json';
+const LEASE_TTL_MS = 30_000;
+// A session dir with no live CODESYS and no live owner is deleted once this old.
+const STALE_DIR_AGE_MS = 60 * 60_000;
+// Identifies this server process; a PID alone is recycled by Windows.
+const SERVER_ID = uuidv4();
+
+export interface SessionOwner {
+  /** Host session id (CLAUDE_CODE_HOST_SESSION_ID / CLAUDE_CODE_SESSION_ID) or CODESYS_MCP_OWNER; null when unknown. */
+  tag: string | null;
+  serverId: string | null;
+  serverPid: number;
+  parentPid: number;
+  heartbeat: number;
+}
+
+export interface Identity {
+  tag: string | null;
+  serverId: string;
+  serverPid: number;
+  parentPid: number;
+}
+
+export type Ownership =
+  | 'self'          // this server process
+  | 'same-session'  // another server of this client session (reconnect / app restart)
+  | 'other-live'    // a live server of another session - never adopt implicitly
+  | 'orphan'        // its server is gone, and it was another session's
+  | 'unowned';      // no owner.json: hand-launched watcher or a pre-lease server
+
+export interface SessionInfo {
+  id: string;
+  dir: string;
+  pid: number | null;
+  codesysAlive: boolean;
+  pythonVersion: string | null;
+  readyMtime: number | null;
+  owner: SessionOwner | null;
+  ownership: Ownership;
+  leaseFresh: boolean;
+  newestMtime: number;
+}
+
+export interface LaunchOutcome {
+  action: 'adopted' | 'spawned' | 'recovered' | 'already-running';
+  pid: number | null;
+  sessionId: string | null;
+  /** Live instances on this PC that were left alone. */
+  others: SessionInfo[];
+}
+
+/** pid -> process start (epoch ms) and main window title, or null when the listing failed. */
+export type CodesysSnapshot = Map<number, { start: number; title: string }>;
+
+export function currentOwnerTag(): string | null {
+  return process.env.CODESYS_MCP_OWNER
+    || process.env.CLAUDE_CODE_HOST_SESSION_ID
+    || process.env.CLAUDE_CODE_SESSION_ID
+    || null;
+}
+
+/** EPERM means the process exists but belongs to another integrity level (elevated). */
+function isPidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return (err as NodeJS.ErrnoException)?.code === 'EPERM';
+  }
+}
+
+export function classifyOwnership(
+  owner: SessionOwner | null,
+  me: { tag: string | null; serverId: string },
+  now: number,
+  serverAlive: (pid: number) => boolean = isPidAlive,
+): { ownership: Ownership; leaseFresh: boolean } {
+  if (!owner) return { ownership: 'unowned', leaseFresh: false };
+  const leaseFresh = now - owner.heartbeat < LEASE_TTL_MS && serverAlive(owner.serverPid);
+  if (owner.serverId !== null && owner.serverId === me.serverId) return { ownership: 'self', leaseFresh };
+  if (me.tag && owner.tag === me.tag) return { ownership: 'same-session', leaseFresh };
+  return { ownership: leaseFresh ? 'other-live' : 'orphan', leaseFresh };
+}
+
+function mtimeOf(p: string): number {
+  try { return fs.statSync(p).mtimeMs; } catch { return 0; }
+}
+
+/**
+ * Read every session dir under `root`. Pure apart from the filesystem; the CODESYS and
+ * server liveness probes are injected so tests can fake them. `isCodesys` gets the
+ * ready.signal mtime so it can reject a PID recycled after that signal was written.
+ */
+export function scanSessionsIn(
+  root: string,
+  me: { tag: string | null; serverId: string },
+  isCodesys: (pid: number, readyMtime: number | null) => boolean,
+  now: number = Date.now(),
+  serverAlive: (pid: number) => boolean = isPidAlive,
+): SessionInfo[] {
+  if (!fs.existsSync(root)) return [];
+  const out: SessionInfo[] = [];
+  for (const ent of fs.readdirSync(root, { withFileTypes: true })) {
+    // Junctions (the old '<guid>.hold' sharing trick) are not directories here; leave them.
+    if (!ent.isDirectory()) continue;
+    const dir = path.join(root, ent.name);
+    // Commands and results land in subdirs and the watcher appends to its log, so the
+    // root dir's own mtime alone says nothing about activity.
+    const newest = ['', 'commands', 'results', 'watcher.log', 'ready.signal', LEASE_FILE]
+      .map((p) => mtimeOf(path.join(dir, p)));
+    if (newest[0] === 0) continue;
+    const newestMtime = Math.max(...newest);
+
+    let pid: number | null = null;
+    let pythonVersion: string | null = null;
+    let readyMtime: number | null = null;
+    const sigPath = path.join(dir, 'ready.signal');
+    try {
+      readyMtime = fs.statSync(sigPath).mtimeMs;
+      const sig = JSON.parse(fs.readFileSync(sigPath, 'utf-8'));
+      if (typeof sig.pid === 'number') pid = sig.pid;
+      if (typeof sig.python_version === 'string') pythonVersion = sig.python_version;
+    } catch { /* no or malformed ready.signal */ }
+
+    let owner: SessionOwner | null = null;
+    try {
+      const o = JSON.parse(fs.readFileSync(path.join(dir, LEASE_FILE), 'utf-8'));
+      if (typeof o.serverPid === 'number' && typeof o.heartbeat === 'number') {
+        owner = {
+          tag: typeof o.tag === 'string' ? o.tag : null,
+          serverId: typeof o.serverId === 'string' ? o.serverId : null,
+          serverPid: o.serverPid,
+          parentPid: typeof o.parentPid === 'number' ? o.parentPid : 0,
+          heartbeat: o.heartbeat,
+        };
+      }
+    } catch { /* no lease */ }
+
+    const { ownership, leaseFresh } = classifyOwnership(owner, me, now, serverAlive);
+    out.push({
+      id: ent.name,
+      dir,
+      pid,
+      codesysAlive: pid !== null && isCodesys(pid, readyMtime),
+      pythonVersion,
+      readyMtime,
+      owner,
+      ownership,
+      leaseFresh,
+      newestMtime,
+    });
+  }
+  return out;
+}
+
+/**
+ * The session a plain launch_codesys may attach to without being told: one this client
+ * session owned whose server is gone (an MCP reconnect or an app restart). With no
+ * session identity at all, an orphan from the same parent process. Never another
+ * session's instance, live or orphaned, never an unowned one, and never one another
+ * live server of this session still drives - those need an explicit `adopt`.
+ */
+export function pickImplicitAdoption(
+  sessions: SessionInfo[],
+  me: { tag: string | null; parentPid: number },
+): SessionInfo | null {
+  const live = sessions.filter((s) => s.codesysAlive);
+  const mine = live.filter((s) =>
+    s.ownership === 'self' ||
+    (s.ownership === 'same-session' && !s.leaseFresh) ||
+    (me.tag === null && s.ownership === 'orphan' && s.owner !== null &&
+      s.owner.tag === null && s.owner.parentPid === me.parentPid));
+  if (mine.length === 0) return null;
+  mine.sort((a, b) => (b.readyMtime ?? 0) - (a.readyMtime ?? 0));
+  return mine[0];
+}
+
+/** Dirs safe to delete: CODESYS gone, no live owner, idle for STALE_DIR_AGE_MS. */
+export function selectStaleSessions(sessions: SessionInfo[], now: number): SessionInfo[] {
+  return sessions.filter((s) =>
+    !s.codesysAlive && !s.leaseFresh && s.ownership !== 'self' &&
+    now - s.newestMtime > STALE_DIR_AGE_MS);
+}
+
 export class CodesysLauncher implements ScriptExecutor {
   private config: LauncherConfig;
   private state: CodesysState = 'stopped';
@@ -35,6 +222,7 @@ export class CodesysLauncher implements ScriptExecutor {
   private startedAt: number | null = null;
   private lastError: string | null = null;
   private healthInterval: ReturnType<typeof setInterval> | null = null;
+  private leaseInterval: ReturnType<typeof setInterval> | null = null;
   private stateChangeCallbacks: Array<(state: CodesysState) => void> = [];
 
   constructor(config: LauncherConfig) {
@@ -53,11 +241,7 @@ export class CodesysLauncher implements ScriptExecutor {
    * authorises a kill.
    */
   private isCodesysProcess(pid: number): boolean {
-    try {
-      process.kill(pid, 0);
-    } catch {
-      return false; // no process holds this PID
-    }
+    if (!isPidAlive(pid)) return false; // no process holds this PID
     if (process.platform !== 'win32') return true;
     try {
       const { execSync } = require('child_process');
@@ -75,103 +259,202 @@ export class CodesysLauncher implements ScriptExecutor {
     }
   }
 
-  /**
-   * Scan %TEMP%/codesys-mcp-persistent/ for an existing live session and
-   * adopt it. Used at first launch() after an MCP-server restart, where the
-   * previous server left a perfectly good CODESYS+watcher running but the
-   * fresh CodesysLauncher has no PID recorded. Returns true if a session
-   * was adopted (state set to 'ready'), false otherwise.
-   *
-   * Adoption rules:
-   *   - The session's ready.signal must exist and parse as JSON.
-   *   - The PID recorded in ready.signal must still be a live CODESYS process.
-   *   - The recorded profile must match config.profileName (skip if mismatched).
-   *   - When multiple candidates exist, prefer the most-recently-modified
-   *     ready.signal (newest live session).
-   */
-  private async tryAdoptExistingSession(): Promise<boolean> {
-    try {
-      const sessionsRoot = path.join(os.tmpdir(), SESSION_DIR_PREFIX);
-      if (!fs.existsSync(sessionsRoot)) return false;
-      const entries = fs.readdirSync(sessionsRoot, { withFileTypes: true });
-      const candidates: Array<{ dir: string; pid: number; sig: string; mtime: number }> = [];
-      for (const ent of entries) {
-        if (!ent.isDirectory()) continue;
-        const dir = path.join(sessionsRoot, ent.name);
-        const sigPath = path.join(dir, 'ready.signal');
-        if (!fs.existsSync(sigPath)) continue;
-        let parsed: { pid?: number; python_version?: string } = {};
-        try {
-          parsed = JSON.parse(fs.readFileSync(sigPath, 'utf-8'));
-        } catch {
-          continue; // malformed ready.signal — skip
-        }
-        if (typeof parsed.pid !== 'number') continue;
-        // Profile gate: ready.signal records python_version including the
-        // profile string. Require config.profileName to appear in it.
-        if (parsed.python_version && this.config.profileName &&
-            !parsed.python_version.includes(this.config.profileName)) {
-          continue;
-        }
-        // Liveness check: the PID must still be a CODESYS process, not merely
-        // some process that inherited a recycled PID.
-        if (!this.isCodesysProcess(parsed.pid)) {
-          launcherLog.info(`Skipping stale session ${ent.name}: PID ${parsed.pid} is not a live CODESYS process`);
-          continue;
-        }
-        const mtime = fs.statSync(sigPath).mtimeMs;
-        candidates.push({ dir, pid: parsed.pid, sig: sigPath, mtime });
-      }
-      if (candidates.length === 0) return false;
-      candidates.sort((a, b) => b.mtime - a.mtime);
-      const chosen = candidates[0];
-      launcherLog.info(`Adopting existing session: PID ${chosen.pid} dir ${chosen.dir}`);
-      this.sessionId = path.basename(chosen.dir);
-      this.ipcDir = chosen.dir;
-      this.ipcClient = new IpcClient({ baseDir: this.ipcDir, ...DEFAULT_IPC_CONFIG });
-      await this.ipcClient.ensureDirectories();
-      this.pid = chosen.pid;
-      this.process = null; // we didn't spawn it; no ChildProcess handle
-      this.startedAt = chosen.mtime;
-      this.lastError = null;
-      this.setState('ready');
-      this.startHealthMonitor();
-      return true;
-    } catch (err) {
-      launcherLog.warn(`Adoption scan failed: ${err}`);
-      return false;
-    }
+  private identity(): Identity {
+    return { tag: currentOwnerTag(), serverId: SERVER_ID, serverPid: process.pid, parentPid: process.ppid };
   }
 
   /**
-   * Launch CODESYS with UI and watcher script.
+   * One listing of every CODESYS process: start time and window title. Null when the
+   * listing failed - callers must then not act on "this CODESYS is gone".
+   */
+  private codesysSnapshot(): CodesysSnapshot | null {
+    if (process.platform !== 'win32') return null;
+    try {
+      const { execFileSync } = require('child_process');
+      const exe = path.basename(this.config.codesysPath).replace(/'/g, "''");
+      const ps =
+        '[Console]::OutputEncoding = [Text.Encoding]::UTF8; ' +
+        `ConvertTo-Json -Compress -InputObject @(Get-CimInstance Win32_Process -Filter "Name='${exe}'" | ` +
+        'ForEach-Object { $p = Get-Process -Id $_.ProcessId -ErrorAction SilentlyContinue; ' +
+        '[pscustomobject]@{ pid = [int]$_.ProcessId; ' +
+        'start = [long]([DateTimeOffset]$_.CreationDate).ToUnixTimeMilliseconds(); ' +
+        'title = [string]$p.MainWindowTitle } })';
+      const out: string = execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', ps], {
+        timeout: 20_000,
+        encoding: 'utf-8',
+        windowsHide: true,
+      });
+      const list = JSON.parse(String(out).trim() || '[]');
+      const snap: CodesysSnapshot = new Map();
+      for (const e of Array.isArray(list) ? list : [list]) {
+        if (typeof e?.pid === 'number') snap.set(e.pid, { start: Number(e.start) || 0, title: e.title ?? '' });
+      }
+      return snap;
+    } catch (err) {
+      launcherLog.warn(`CODESYS process listing failed: ${err}`);
+      return null;
+    }
+  }
+
+  private scan(): { sessions: SessionInfo[]; snapshot: CodesysSnapshot | null } {
+    const snapshot = this.codesysSnapshot();
+    // A PID that started after its ready.signal was written is a recycled one.
+    const isCodesys = (pid: number, readyMtime: number | null) => snapshot
+      ? snapshot.has(pid) && (readyMtime === null || snapshot.get(pid)!.start <= readyMtime + 2_000)
+      : this.isCodesysProcess(pid);
+    try {
+      const sessions = scanSessionsIn(path.join(os.tmpdir(), SESSION_DIR_PREFIX), this.identity(), isCodesys);
+      return { sessions, snapshot };
+    } catch (err) {
+      launcherLog.warn(`Session scan failed: ${err}`);
+      return { sessions: [], snapshot: null };
+    }
+  }
+
+  /** Every session dir on this PC, classified against this server. */
+  scanSessions(): SessionInfo[] {
+    return this.scan().sessions;
+  }
+
+  /**
+   * Delete session dirs with no live CODESYS, no live owner and no activity for an hour.
+   * Only on a successful process listing: a failed probe must never delete a live dir.
+   */
+  private removeStaleSessions(sessions: SessionInfo[], snapshot: CodesysSnapshot | null): SessionInfo[] {
+    if (!snapshot) return sessions;
+    const stale = new Set(selectStaleSessions(sessions, Date.now()));
+    return sessions.filter((s) => {
+      if (!stale.has(s)) return true;
+      try {
+        fs.rmSync(s.dir, { recursive: true, force: true });
+        launcherLog.info(`Removed stale session dir ${s.id}`);
+        return false;
+      } catch (err) {
+        launcherLog.warn(`Could not remove stale session dir ${s.id}: ${err}`);
+        return true;
+      }
+    });
+  }
+
+  /** Record (or refresh) this server as the owner of the session it drives. */
+  private writeLease(): void {
+    if (!this.ipcDir) return;
+    const lease: SessionOwner = { ...this.identity(), heartbeat: Date.now() };
+    const target = path.join(this.ipcDir, LEASE_FILE);
+    try {
+      fs.writeFileSync(target + '.tmp', JSON.stringify(lease), 'utf-8');
+      fs.renameSync(target + '.tmp', target);
+    } catch (err) {
+      launcherLog.warn(`Could not write ${LEASE_FILE}: ${err}`);
+    }
+  }
+
+  /** Keep the lease fresh in every state while this server holds a session dir. */
+  private startLease(): void {
+    this.writeLease();
+    if (this.leaseInterval) return;
+    this.leaseInterval = setInterval(() => this.writeLease(), HEALTH_CHECK_INTERVAL_MS);
+  }
+
+  private stopLease(): void {
+    if (this.leaseInterval) {
+      clearInterval(this.leaseInterval);
+      this.leaseInterval = null;
+    }
+  }
+
+  private async attach(s: SessionInfo): Promise<void> {
+    launcherLog.info(`Adopting session ${s.id}: PID ${s.pid} (${s.ownership})`);
+    // A CODESYS this server spawned earlier (a timed-out launch) stops being tracked.
+    if (this.process) {
+      this.process.removeAllListeners('exit');
+      this.process = null;
+    }
+    this.sessionId = s.id;
+    this.ipcDir = s.dir;
+    this.ipcClient = new IpcClient({ baseDir: this.ipcDir, ...DEFAULT_IPC_CONFIG });
+    await this.ipcClient.ensureDirectories();
+    this.pid = s.pid;
+    this.startedAt = s.readyMtime;
+    this.lastError = null;
+    this.startLease();
+    this.setState('ready');
+    this.startHealthMonitor();
+  }
+
+  /**
+   * Launch CODESYS with UI and watcher script, or attach to a running one.
    *
    * `overrides.additionalFolder` lets a caller pick the AdditionalFolder per
    * launch instead of per server process, so one MCP config can serve several
    * projects with different pinned library sets. The configured value stays
    * the fallback when no override is supplied.
+   *
+   * `adopt` (session id or CODESYS PID) attaches to that instance; one a live server
+   * of another session owns needs `force`. `fresh` always spawns a new instance.
    */
-  async launch(overrides?: { additionalFolder?: string }): Promise<void> {
+  async launch(overrides?: {
+    additionalFolder?: string;
+    adopt?: string;
+    fresh?: boolean;
+    force?: boolean;
+  }): Promise<LaunchOutcome> {
     if (this.state === 'ready' || this.state === 'launching') {
+      if (overrides?.adopt) {
+        throw new Error(`Already attached to PID ${this.pid} (session ${this.sessionId}); shutdown_codesys first`);
+      }
       launcherLog.warn(`Cannot launch: state is ${this.state}`);
-      return;
+      return { action: 'already-running', pid: this.pid, sessionId: this.sessionId, others: [] };
     }
 
     const additionalFolder = overrides?.additionalFolder ?? this.config.additionalFolder;
+    const scanned = this.scan();
+    const sessions = this.removeStaleSessions(scanned.sessions, scanned.snapshot);
+    const othersThan = (id: string | null) => sessions.filter((s) => s.codesysAlive && s.id !== id);
 
-    // First: try to adopt an existing live session left by a previous MCP
-    // server process. This closes out the "orphan CODESYS on MCP restart"
-    // problem — without it, a /mcp reconnect spawns a second CODESYS on top
-    // of the live one and they fight for project lockfiles. Only runs on a
-    // genuinely fresh launcher (no PID recorded yet); after that the
-    // error-recovery path below handles same-process retries.
-    // Also after a failed launch whose CODESYS is gone (state 'error', dead PID): the
-    // user may have started CODESYS by hand and attached a watcher to it, and skipping
-    // adoption here spawned a second CODESYS next to theirs.
+    if (overrides?.adopt) {
+      const want = overrides.adopt.trim().replace(/^ide-/i, '');
+      const target = sessions.find((s) => s.id === want || String(s.pid) === want);
+      if (!target || !target.codesysAlive) {
+        throw new Error(`No live CODESYS session matches '${overrides.adopt}' (give a session id or a CODESYS PID from get_codesys_status)`);
+      }
+      if (target.ownership === 'other-live' && !overrides.force) {
+        throw new Error(
+          `Session ${target.id} (PID ${target.pid}) is driven by another live MCP server ` +
+          `(server PID ${target.owner?.serverPid}, owner ${target.owner?.tag ?? 'unknown'}). ` +
+          `Pass force=true only if that session is idle - two servers on one IDE interleave scripts.`
+        );
+      }
+      await this.attach(target);
+      return { action: 'adopted', pid: this.pid, sessionId: this.sessionId, others: othersThan(target.id) };
+    }
+
+    // Re-attach to an instance this client session already owned. This closes out the
+    // "orphan CODESYS on MCP restart" problem - without it, a /mcp reconnect spawns a
+    // second CODESYS on top of the live one and they fight for project lockfiles. Only on
+    // a genuinely fresh launcher, or after a failed launch whose CODESYS is gone. Another
+    // session's instance is never taken implicitly (that used to hijack it: the newest
+    // live ready.signal won), nor is an unowned hand-launched one - see `adopt`.
     const deadAfterError = this.state === 'error' && (this.pid === null || !this.isCodesysProcess(this.pid));
-    if ((this.pid === null && this.state === 'stopped') || deadAfterError) {
-      if (await this.tryAdoptExistingSession()) {
-        return;
+    if (!overrides?.fresh && ((this.pid === null && this.state === 'stopped') || deadAfterError)) {
+      const pick = pickImplicitAdoption(
+        sessions.filter((s) => !s.pythonVersion || !this.config.profileName ||
+          s.pythonVersion.includes(this.config.profileName)),
+        this.identity(),
+      );
+      if (pick) {
+        await this.attach(pick);
+        return { action: 'adopted', pid: this.pid, sessionId: this.sessionId, others: othersThan(pick.id) };
+      }
+      // A failed launch next to a hand-started CODESYS with its own watcher: name it
+      // rather than spawning a second IDE beside it.
+      const handmade = sessions.filter((s) => s.codesysAlive && s.ownership === 'unowned');
+      if (deadAfterError && handmade.length > 0) {
+        throw new Error(
+          'A CODESYS with an MCP watcher but no owner is running: ' +
+          handmade.map((s) => `PID ${s.pid} (session ${s.id})`).join(', ') +
+          '. Attach with adopt=<session or PID>, or pass fresh=true to start another instance.'
+        );
       }
     }
 
@@ -190,9 +473,10 @@ export class CodesysLauncher implements ScriptExecutor {
           launcherLog.info(`Recovery: live PID ${this.pid} watcher already ready; attaching`);
           this.lastError = null;
           if (this.startedAt === null) this.startedAt = Date.now();
+          this.writeLease();
           this.setState('ready');
           this.startHealthMonitor();
-          return;
+          return { action: 'recovered', pid: this.pid, sessionId: this.sessionId, others: othersThan(this.sessionId) };
         }
         launcherLog.warn(`Recovery: PID ${this.pid} alive but watcher not ready yet — polling without respawn`);
         this.setState('launching');
@@ -201,10 +485,11 @@ export class CodesysLauncher implements ScriptExecutor {
           if (await this.ipcClient.isReady()) {
             this.lastError = null;
             if (this.startedAt === null) this.startedAt = Date.now();
+            this.writeLease();
             this.setState('ready');
             launcherLog.info('CODESYS watcher is ready (recovery path)');
             this.startHealthMonitor();
-            return;
+            return { action: 'recovered', pid: this.pid, sessionId: this.sessionId, others: othersThan(this.sessionId) };
           }
           await this.sleep(READY_POLL_MS);
         }
@@ -259,6 +544,8 @@ export class CodesysLauncher implements ScriptExecutor {
       ...DEFAULT_IPC_CONFIG,
     });
     await this.ipcClient.ensureDirectories();
+    // Claim the dir before CODESYS exists, so no other server takes it as an orphan.
+    this.startLease();
 
     // Prepare watcher script with interpolated IPC path. ScriptManager.
     // interpolate() now Python-escapes the value, so no manual pre-escape.
@@ -311,8 +598,10 @@ export class CodesysLauncher implements ScriptExecutor {
     launcherLog.info(`CODESYS spawned with PID ${this.pid}`);
 
     // Handle process exit
+    const spawnedPid = this.pid;
     this.process.on('exit', (code) => {
-      launcherLog.warn(`CODESYS process exited with code ${code}`);
+      launcherLog.warn(`CODESYS process ${spawnedPid} exited with code ${code}`);
+      if (this.pid !== spawnedPid) return; // since attached elsewhere
       if (this.state !== 'stopping') {
         this.lastError = `CODESYS exited unexpectedly (code ${code})`;
         this.setState('error');
@@ -327,9 +616,10 @@ export class CodesysLauncher implements ScriptExecutor {
       if (await this.ipcClient.isReady()) {
         this.setState('ready');
         this.startedAt = Date.now();
+        this.writeLease();
         launcherLog.info('CODESYS watcher is ready');
         this.startHealthMonitor();
-        return;
+        return { action: 'spawned', pid: this.pid, sessionId: this.sessionId, others: othersThan(this.sessionId) };
       }
       await this.sleep(READY_POLL_MS);
     }
@@ -435,6 +725,7 @@ sys.exit(0)
     }
 
     // Clean up IPC directory
+    this.stopLease();
     if (this.ipcClient) {
       await this.ipcClient.cleanup();
     }
@@ -466,15 +757,30 @@ sys.exit(0)
     };
   }
 
+  /**
+   * Every CODESYS on this PC with the session (if any) that serves it and its window
+   * title, so a caller can see other sessions' instances before acting.
+   */
+  listInstances(): Array<{ pid: number; title: string; session: SessionInfo | null }> {
+    const { sessions, snapshot } = this.scan();
+    const live = sessions.filter((s) => s.codesysAlive && s.pid !== null);
+    const pids = new Set<number>([...(snapshot?.keys() ?? []), ...live.map((s) => s.pid as number)]);
+    return [...pids].sort((a, b) => a - b).map((pid) => ({
+      pid,
+      title: snapshot?.get(pid)?.title ?? '',
+      session: live.find((s) => s.pid === pid) ?? null,
+    }));
+  }
+
+  /** This server's owner tag, for status output. */
+  ownerTag(): string | null {
+    return currentOwnerTag();
+  }
+
   /** Check if the CODESYS process is still alive */
   isRunning(): boolean {
     if (this.pid === null) return false;
-    try {
-      process.kill(this.pid, 0); // Signal 0 = test if process exists
-      return true;
-    } catch {
-      return false;
-    }
+    return isPidAlive(this.pid);
   }
 
   /** Register callback for state changes */
@@ -494,6 +800,7 @@ sys.exit(0)
   }
 
   private startHealthMonitor(): void {
+    this.stopHealthMonitor();
     this.healthInterval = setInterval(() => {
       if (this.state === 'ready' && !this.isRunning()) {
         launcherLog.error('Health check: CODESYS process died');
