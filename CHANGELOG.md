@@ -15,6 +15,17 @@ Launcher fixes for projects that need a specific library set and for hosts where
 - **Adoption is retried after a failed launch whose CODESYS is gone.** The retry used to skip adoption and spawn a second CODESYS next to one started by hand with a watcher attached.
 - **Non-ASCII bytes removed from eight IronPython scripts** (`connect_to_device`, `create_project`, `download_to_device`, `ensure_online_connection`, `list_device_repository`, `list_project_templates`, `monitor_variables`, `write_variable`). Without a coding header these can crash IronPython 2.7; `dev/check-scripts.ps1` now passes again.
 
+### Multi-session safety
+
+Several MCP client sessions on one PC, each driving its own CODESYS, used to step on each other.
+
+- **Ownership lease.** The launcher writes `owner.json` (owner tag, per-process server id, parent PID, heartbeat) into its session dir and refreshes it every 5 s. A plain `launch_codesys` re-attaches only to a live instance with this session's tag (or, with no tag, an orphan of the same parent process). It used to adopt the newest live `ready.signal`, which hijacked another session's IDE after a `shutdown_codesys` + `launch_codesys`. The session tag comes from `CODESYS_MCP_OWNER`, `CLAUDE_CODE_HOST_SESSION_ID` or `CLAUDE_CODE_SESSION_ID`.
+- **`launch_codesys` `adopt` / `fresh` / `force`.** `adopt` attaches to a named session id or CODESYS PID (for example a hand-launched IDE with its own watcher); an instance a live server of another session drives needs `force`. `fresh` always spawns. The reply names the action and the live instances it left alone.
+- **No silent headless in persistent mode.** Before `launch_codesys` and after `shutdown_codesys`, tools return an error instead of spawning `CODESYS --noUI` against a locked project. `--fallback-headless` still applies to a failed auto-launch. Callers that relied on the old fallback must call `launch_codesys` first.
+- **Stale session dirs are pruned** on launch: no live CODESYS, no live owner, untouched for an hour. Pruning runs only after a successful process listing, and a CODESYS PID that started after its `ready.signal` counts as recycled.
+- **`get_codesys_status` lists every CODESYS on the PC** with its owner and window title, and prints this server's owner tag.
+- **A server whose stdin closes** (session ended, MCP reconnect) marks its lease expired and exits, leaving CODESYS running, so the session's next server re-attaches at once. The SDK's stdio transport never noticed a closed stdin, and the server lingered with a live lease.
+
 ## 0.6.3 — 2026-05-20
 
 Bug-fix release. Unblocks every online tool against a real PLC. Three independent bugs in the V3-scripting-driven online path were combining to make `connect_to_device`, `download_to_device`, `start_stop_application`, `get_application_state`, `read_variable`, `write_variable`, and `monitor_variables` fail when invoked through MCP (IPC-driven scripting) against actual hardware. Verified end-to-end on V3 SP16 P5 against an ifm AE3100 IIoT Controller.
