@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+Launcher fixes for projects that need a specific library set and for hosts where PIDs get recycled.
+
+### Added
+
+- **`--additional-folder` / `CODESYS_ADDITIONAL_FOLDER`, and a per-launch `additionalFolder` argument on `launch_codesys`.** Passed to CODESYS as `--additionalfolder` on both the persistent and the headless launch paths. A project pinned to a non-Default library set could not be opened before: the IDE resolved a different library generation and the project failed to compile. The tool argument picks the folder per launch, so one server config can serve several projects. Unset, behaviour is unchanged.
+
+### Fixed
+
+- **`--profile` and `--runscript` are now quoted on the UI launch path, and CODESYS is spawned with `windowsVerbatimArguments`.** A profile name with spaces (for example `CODESYS V3.5 SP19 Patch 7`) was split at the first space, the IDE fell back to its Select Profile dialog, and the watcher never started. Verbatim spawn avoids Node re-escaping the embedded quotes, which CODESYS mis-parses; the command line now matches the one the CODESYS Installer uses.
+- **A recycled PID is no longer adopted or killed.** Adoption and the force-kill in `shutdown_codesys` trusted `process.kill(pid, 0)`, which only proves that some process holds the PID. Both now check that the PID belongs to the configured `CODESYS.exe` (via `tasklist`) and fail closed.
+- **Adoption is retried after a failed launch whose CODESYS is gone.** The retry used to skip adoption and spawn a second CODESYS next to one started by hand with a watcher attached.
+- **Non-ASCII bytes removed from eight IronPython scripts** (`connect_to_device`, `create_project`, `download_to_device`, `ensure_online_connection`, `list_device_repository`, `list_project_templates`, `monitor_variables`, `write_variable`). Without a coding header these can crash IronPython 2.7; `dev/check-scripts.ps1` now passes again.
+
 ## 0.6.3 — 2026-05-20
 
 Bug-fix release. Unblocks every online tool against a real PLC. Three independent bugs in the V3-scripting-driven online path were combining to make `connect_to_device`, `download_to_device`, `start_stop_application`, `get_application_state`, `read_variable`, `write_variable`, and `monitor_variables` fail when invoked through MCP (IPC-driven scripting) against actual hardware. Verified end-to-end on V3 SP16 P5 against an ifm AE3100 IIoT Controller.
