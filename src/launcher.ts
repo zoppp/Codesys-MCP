@@ -223,10 +223,13 @@ export class CodesysLauncher implements ScriptExecutor {
 
     // Build CODESYS args. Pass argv directly (no shell) so this.process.pid
     // is the real CODESYS PID rather than a wrapping cmd.exe shell PID.
-    // Node will quote args containing spaces correctly when shell is off.
+    // Values are pre-quoted and passed verbatim (see windowsVerbatimArguments below).
     const codesysArgs = [
-      `--profile=${this.config.profileName}`,
-      `--runscript=${watcherPath}`,
+      // Quote the value like headless.ts does: an unquoted name with spaces reaches
+      // CODESYS as `--profile=CODESYS V3.5 SP19 Patch 7` and the IDE falls back to the
+      // 'Select Profile' dialog, which blocks --runscript until someone clicks Continue.
+      `--profile="${this.config.profileName}"`,
+      `--runscript="${watcherPath}"`,
     ];
     const codesysDir = path.dirname(this.config.codesysPath);
 
@@ -239,6 +242,10 @@ export class CodesysLauncher implements ScriptExecutor {
       windowsHide: false,
       stdio: 'ignore',
       cwd: codesysDir,
+      // Pass the args exactly as written. Node's own quoting turns embedded quotes into
+      // \" escapes, which CODESYS mis-parses for values with spaces. Verbatim gives the
+      // same command line the CODESYS Installer uses.
+      windowsVerbatimArguments: true,
     });
 
     this.pid = this.process.pid ?? null;
