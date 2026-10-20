@@ -165,7 +165,11 @@ export class CodesysLauncher implements ScriptExecutor {
     // of the live one and they fight for project lockfiles. Only runs on a
     // genuinely fresh launcher (no PID recorded yet); after that the
     // error-recovery path below handles same-process retries.
-    if (this.pid === null && this.state === 'stopped') {
+    // Also after a failed launch whose CODESYS is gone (state 'error', dead PID): the
+    // user may have started CODESYS by hand and attached a watcher to it, and skipping
+    // adoption here spawned a second CODESYS next to theirs.
+    const deadAfterError = this.state === 'error' && (this.pid === null || !this.isCodesysProcess(this.pid));
+    if ((this.pid === null && this.state === 'stopped') || deadAfterError) {
       if (await this.tryAdoptExistingSession()) {
         return;
       }
