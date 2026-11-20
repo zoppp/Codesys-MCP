@@ -4,6 +4,29 @@ MCP server that exposes the CODESYS V3.5 IDE scripting API as 41 tools and 3 res
 
 Unlike headless-only wrappers that spawn a new `--noUI` CODESYS process per command, this server launches CODESYS with its UI visible and routes every tool call through a watcher script running inside that same instance. Changes appear in the IDE in real time and the user can interact with CODESYS alongside AI-driven automation.
 
+## What this fork changes
+
+This is a fork of [luke-harriman/Codesys-MCP](https://github.com/luke-harriman/Codesys-MCP) with fixes for running several MCP client sessions on one PC, each with its own CODESYS, and for projects that need a non-default library set. Details are in [CHANGELOG.md](CHANGELOG.md) under "Unreleased". Tested on CODESYS V3.5 SP19 Patch 7.
+
+**Multi-session safety**
+
+- **Each server owns its CODESYS.** Before, a fresh server adopted the newest live instance on the PC, which hijacked another session's IDE. Now every server writes an ownership lease (`owner.json`, refreshed every 5 s) into its session folder. A plain `launch_codesys` re-attaches only to an instance its own client session started, for example after an MCP reconnect or a client restart, and never takes another session's.
+- **`launch_codesys` has `adopt`, `fresh` and `force`.** `adopt=<session id or PID>` attaches to a named instance, such as a CODESYS started by hand with a watcher. `fresh=true` always spawns a new one. `force=true` takes an instance another live session drives. The reply says what it did and which instances it left alone.
+- **`get_codesys_status` lists every CODESYS on the PC** with its owner (this server, this session, another live session, orphan, or unowned) and its window title.
+- **No silent headless fallback in persistent mode.** Before `launch_codesys`, and after `shutdown_codesys`, tools return "call launch_codesys first". They used to start a headless `CODESYS --noUI` against a project the IDE already had locked.
+- **A server whose client goes away exits.** When stdin closes, the server marks its lease expired and leaves CODESYS running, so the session's next server re-attaches at once.
+- **Stale session folders are pruned** on launch (no live CODESYS, no live owner, untouched for an hour). Pruning runs only after a successful process listing.
+
+**Launcher fixes**
+
+- **`--profile` and `--runscript` are quoted, and CODESYS is spawned with verbatim arguments.** A profile name with spaces (`CODESYS V3.5 SP19 Patch 7`) used to leave the IDE stuck on its Select Profile dialog, so the watcher never started.
+- **`--additional-folder` (server option) and a per-launch `additionalFolder` argument** pass CODESYS an AdditionalFolder, for projects pinned to a non-default library set.
+- **A recycled PID is never adopted or killed.** Adoption and the shutdown force-kill now check that the PID really is `CODESYS.exe`, and fail closed.
+- **After a failed launch whose CODESYS is gone, the server tries adoption** instead of spawning a second CODESYS next to a hand-started one.
+- **Non-ASCII bytes removed from eight IronPython scripts.** They could crash IronPython 2.7 without a coding header, and `dev/check-scripts.ps1` passes again.
+
+**Recommended configuration with several sessions:** add `--no-auto-launch` to every config of this server, including a user-level one. Otherwise each new client session starts its own CODESYS at startup, even when it never touches CODESYS. With the flag, CODESYS starts only when a session calls `launch_codesys`.
+
 ## Requirements
 
 - Windows
@@ -13,7 +36,7 @@ Unlike headless-only wrappers that spawn a new `--noUI` CODESYS process per comm
 ## Install
 
 ```bash
-git clone <repository-url>
+git clone https://github.com/zoppp/Codesys-MCP.git
 cd Codesys-MCP
 npm install
 npm run build
